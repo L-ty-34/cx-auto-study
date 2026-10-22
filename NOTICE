@@ -1,0 +1,33 @@
+# NOTICE
+
+本项目是 `学习通 AI 助手 1.23` 的修改版。
+
+## 原始项目
+
+- 学习通 AI 助手 1.23
+- 作者：Hailin
+- 许可证：MIT
+
+原始脚本中的 AI 答题、字体解密、课程学习等基础逻辑来自该项目；本仓库在其基础上修改并重新发布。
+
+## 内置第三方代码
+
+脚本中打包了以下 MIT 许可代码，原始版权声明保留在脚本头部：
+
+- Typr / Photopea 字体解析代码
+  - Copyright (c) 2016 Photopea
+  - MIT License
+- JavaScript-MD5
+  - Copyright (c) 2011 Sebastian Tschan, https://blueimp.net
+  - MIT License
+
+## 参考与外部资源
+
+- 字体解密思路参考 wyn665817 的「超星字体解密」脚本。
+- `@resource Table` 使用 `https://www.forestpolice.org/ttf/2.0/table.json` 作为外部字体表；该资源不随本仓库分发，其许可与可用性由原站点负责。
+
+## 修改部分
+
+- 学习通全自动学习 1.1
+- 修改：L-ty-34
+- 主要修改：顺序托管、翻节后自动播放、视频不暂停、慢确认弹窗、精简侧栏、重新打包与发布配置。
