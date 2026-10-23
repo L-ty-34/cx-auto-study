@@ -5,7 +5,7 @@
 // @supportURL   https://github.com/L-ty-34/cx-auto-study/issues
 // @updateURL    https://raw.githubusercontent.com/L-ty-34/cx-auto-study/main/cx-auto-study.user.js
 // @downloadURL  https://raw.githubusercontent.com/L-ty-34/cx-auto-study/main/cx-auto-study.user.js
-// @version      1.1
+// @version      1.2
 // @description  学习通全自动学习：视频自动播放、自动翻节、自动答题与提交、托管视频不暂停（基于 1.23 修改版）
 // @match        *://*.chaoxing.com/*
 // @match        *://*.xuexitong.com/*
@@ -2910,7 +2910,7 @@ Typr["U"] = {
 
     const ROOT_ID = 'cx-ai-study-root';
     const UI_HIDDEN_KEY = 'cx_ui_hidden';
-    const ASSISTANT_VERSION = '1.1';
+    const ASSISTANT_VERSION = '1.2';
     const QUESTION_SELECTOR = '.singleQuesId,.TiMu,.question-item[data-question-id],[data-questionid]';
     const DEEPSEEK_BASE = 'https://api.deepseek.com';
     const DEEPSEEK_SEARCH_URL = `${DEEPSEEK_BASE}/anthropic/v1/messages`;
@@ -8421,6 +8421,10 @@ Typr["U"] = {
             nextRules: typeof saved.nextRules === 'string' ? saved.nextRules.slice(0, 2000) : '下一节\n下一集\n下一章\n继续学习',
             autoSubmitEnabled: saved.autoSubmitEnabled === true,
             submitRules: typeof saved.submitRules === 'string' ? saved.submitRules.slice(0, 2000) : '提交答案\n交卷\n提交测验\n提交',
+            videoQuizAnswer: saved.videoQuizAnswer !== false,
+            videoQuizSubmit: saved.videoQuizSubmit !== false,
+            videoQuizResume: saved.videoQuizResume !== false,
+            videoQuizSkipOnFailure: saved.videoQuizSkipOnFailure === true,
             submitDelayMs: autoClickLimit(saved.submitDelayMs, 1000, 60000, 2500),
             postSubmitDelayMs: autoClickLimit(saved.postSubmitDelayMs, 1000, 30000, 4000),
             autoConfirmSubmit: saved.autoConfirmSubmit !== false,
@@ -8477,6 +8481,77 @@ Typr["U"] = {
             parent = parent.parentElement;
         }
         return true;
+    }
+    function autoClickVideoInProgress(documents) {
+        for (const doc of documents) {
+            let videos = [];
+            try { videos = [...doc.querySelectorAll('video')]; } catch { continue; }
+            for (const video of videos) {
+                if (!video.isConnected || !autoClickVisible(video)) continue;
+                const duration = Number(video.duration);
+                if (!Number.isFinite(duration) || duration <= 5 || video.ended) continue;
+                if (Number(video.currentTime) <= 0 && video.paused) continue;
+                return true;
+            }
+        }
+        return false;
+    }
+    function autoClickVideoQuizSubmit(doc) {
+        const selector = 'button,a,[role="button"],input[type="button"],input[type="submit"],[onclick],.btn,.submit,[class*="submit"],[class*="Submit"],#videoquiz-submit,[data-video-quiz-submit]';
+        const usable = node => {
+            if (!autoClickVisible(node)) return false;
+            try { if (node.matches('[disabled],[aria-disabled="true"],.disabled')) return false; } catch { /* 非元素节点。 */ }
+            const text = autoClickText(node);
+            return /^(提交|提交答案|交卷|提交测验|确认提交)$/.test(text) || (/提交/.test(text) && text.length <= 10);
+        };
+        let nodes = [];
+        try { nodes = [...doc.querySelectorAll(selector)].filter(usable); } catch { nodes = []; }
+        // 有些课程把“提交”做成普通 div/span，只带 onclick 或 pointer 样式。
+        if (!nodes.length) {
+            try {
+                nodes = [...doc.querySelectorAll('div,span')].filter(node => {
+                    if (node.childElementCount > 2 || !usable(node)) return false;
+                    const style = node.ownerDocument.defaultView?.getComputedStyle(node);
+                    return Boolean(node.onclick) || style?.cursor === 'pointer' || Boolean(node.closest('.ans-videoquiz,[data-video-quiz-root]'));
+                });
+            } catch { nodes = []; }
+        }
+        if (!nodes.length) return null;
+        nodes.sort((a, b) => {
+            const score = node => (node.closest('.ans-videoquiz,[data-video-quiz-root],[role="dialog"],form') ? 20 : 0)
+                - autoClickText(node).length / 100;
+            return score(b) - score(a);
+        });
+        return nodes[0];
+    }
+    function autoClickVideoQuizClose(documents) {
+        const preferred = /^(关闭|跳过|继续|知道了|取消)$/;
+        for (const doc of documents) {
+            let roots = [];
+            try { roots = [...doc.querySelectorAll('.ans-videoquiz,[data-video-quiz-root],[role="dialog"],.layui-layer,.xubox_layer,.modal,[class*="videoquiz"]')].filter(autoClickVisible); } catch { roots = []; }
+            for (const root of roots) {
+                let nodes = [];
+                try { nodes = [...root.querySelectorAll('button,a,[role="button"],input[type="button"],[onclick],.btn,.close,[class*="close"]')]; } catch { continue; }
+                const hit = nodes.find(node => autoClickVisible(node) && preferred.test(autoClickText(node)));
+                if (hit && autoClickNode(hit)) return hit;
+            }
+        }
+        return null;
+    }
+    function autoClickResumeVideo(documents) {
+        for (const doc of documents) {
+            let videos = [];
+            try { videos = [...doc.querySelectorAll('video')]; } catch { continue; }
+            for (const video of videos) {
+                if (!video.isConnected || !autoClickVisible(video) || video.ended || !video.paused) continue;
+                try {
+                    const played = video.play();
+                    if (played?.catch) played.catch(() => {});
+                    return true;
+                } catch { /* 浏览器可能拦截自动播放。 */ }
+            }
+        }
+        return false;
     }
     function autoClickRootDocument() {
         try { return panelView?.host?.ownerDocument || document; } catch { return document; }
@@ -8748,14 +8823,14 @@ Typr["U"] = {
     }
     function initAutoClickControls(shadow, doc, ctl) {
         const el = id => shadow.getElementById(id);
-        const controlIDs = ['auto-click-rules', 'auto-click-exact', 'auto-click-frames', 'auto-click-interval', 'auto-click-cooldown', 'auto-click-max', 'auto-click-dry-run', 'auto-click-allow-danger', 'auto-answer-enabled', 'auto-next-enabled', 'auto-next-rules', 'auto-submit-enabled', 'auto-submit-rules', 'auto-submit-delay', 'auto-post-delay', 'auto-confirm-submit', 'auto-keep-video-playing', 'auto-smart-consent'];
+        const controlIDs = ['auto-click-rules', 'auto-click-exact', 'auto-click-frames', 'auto-click-interval', 'auto-click-cooldown', 'auto-click-max', 'auto-click-dry-run', 'auto-click-allow-danger', 'auto-answer-enabled', 'auto-video-quiz-answer', 'auto-video-quiz-submit', 'auto-video-quiz-resume', 'auto-video-quiz-skip', 'auto-next-enabled', 'auto-next-rules', 'auto-submit-enabled', 'auto-submit-rules', 'auto-submit-delay', 'auto-post-delay', 'auto-confirm-submit', 'auto-keep-video-playing', 'auto-smart-consent'];
         const logBox = el('auto-click-log'), statusNode = el('auto-click-status');
         let settings = autoClickSettings(), running = false, timer = null, clicks = 0;
         let lastHitKey = '', lastHighlightAt = 0, pickCleanup = null;
         let endedVideos = new WeakMap(), submitReadySince = 0, submitSignature = '', submitMissingLogged = '', confirmWatch = null, pendingVideoStartAt = 0;
         let smartVideo = null, smartVideoRelease = null, smartVideoLogged = false, smartVideoSuppressed = false;
         let postSubmitNextAt = 0, postSubmitWarned = false, postSubmitConfirmed = false, autoAnswerWarned = '', lastNextQuestionAt = 0, quizFrameWarned = false;
-        let remoteQuizFrames = [], remoteQuizRequestedAt = 0, remoteQuizFirstRequestedAt = 0, remoteQuizAnswered = false, remoteSubmitRequested = false, remoteQuizSubmitted = false, remoteQuizWarnedAt = 0, remoteQuizRequestLogged = false, remoteQuizPageUrl = '', remoteQuizDetected = false, remoteProbeAt = 0, remoteProbeStartedAt = 0, remoteProbeWarned = false;
+        let remoteQuizFrames = [], remoteQuizRequestedAt = 0, remoteQuizFirstRequestedAt = 0, remoteQuizAnswered = false, remoteQuizAnsweredAt = 0, remoteSubmitRequested = false, remoteQuizSubmitted = false, remoteQuizWarnedAt = 0, remoteQuizRequestLogged = false, remoteQuizPageUrl = '', remoteQuizDetected = false, remoteQuizMidVideo = false, remoteProbeAt = 0, remoteProbeStartedAt = 0, remoteProbeWarned = false;
         const lastClicks = new WeakMap(), submittedQuizzes = new Set(), dryRunSubmitLogged = new Set(), autoAnswerAttempted = new Set();
         const TAB_ID = (() => {
             try {
@@ -8821,6 +8896,10 @@ Typr["U"] = {
             el('auto-click-dry-run').checked = settings.dryRun;
             el('auto-click-allow-danger').checked = settings.allowDanger;
             el('auto-answer-enabled').checked = settings.autoAnswerEnabled;
+            el('auto-video-quiz-answer').checked = settings.videoQuizAnswer;
+            el('auto-video-quiz-submit').checked = settings.videoQuizSubmit;
+            el('auto-video-quiz-resume').checked = settings.videoQuizResume;
+            el('auto-video-quiz-skip').checked = settings.videoQuizSkipOnFailure;
             el('auto-next-enabled').checked = settings.autoNextEnabled;
             el('auto-next-rules').value = settings.nextRules;
             el('auto-submit-enabled').checked = settings.autoSubmitEnabled;
@@ -8841,6 +8920,10 @@ Typr["U"] = {
             dryRun: el('auto-click-dry-run').checked,
             allowDanger: el('auto-click-allow-danger').checked,
             autoAnswerEnabled: el('auto-answer-enabled').checked,
+            videoQuizAnswer: el('auto-video-quiz-answer').checked,
+            videoQuizSubmit: el('auto-video-quiz-submit').checked,
+            videoQuizResume: el('auto-video-quiz-resume').checked,
+            videoQuizSkipOnFailure: el('auto-video-quiz-skip').checked,
             bridgeToken: settings.bridgeToken,
             autoNextEnabled: el('auto-next-enabled').checked,
             nextRules: el('auto-next-rules').value,
@@ -8931,31 +9014,69 @@ Typr["U"] = {
                 log('视频不暂停已开启：托管期间鼠标移出视频/窗口也会继续播放', 'hit');
             }
         };
-        const sendRemoteQuiz = (action, frames = remoteQuizFrames) => {
+        const sendRemoteQuiz = (action, frames = remoteQuizFrames, extra = {}) => {
             const token = settings.bridgeToken;
             if (!token) return false;
             let sent = false;
             for (const frame of frames) {
                 try {
-                    frame.contentWindow?.postMessage({ type: `cx-auto-quiz-${action}`, token }, '*');
+                    frame.contentWindow?.postMessage({ type: `cx-auto-quiz-${action}`, token, ...extra }, '*');
                     sent = true;
                 } catch { /* iframe 已卸载。 */ }
             }
             return sent;
         };
+        const finishRemoteQuiz = message => {
+            remoteQuizSubmitted = true;
+            remoteQuizDetected = false;
+            remoteSubmitRequested = true;
+            remoteQuizFrames = [];
+            remoteQuizRequestedAt = 0;
+            postSubmitConfirmed = true;
+            if (settings.autoNextEnabled && !remoteQuizMidVideo) postSubmitNextAt = Date.now() + settings.postSubmitDelayMs;
+            log(message, 'hit');
+            if (settings.videoQuizResume && remoteQuizMidVideo) {
+                doc.defaultView?.setTimeout(() => autoClickResumeVideo(autoClickDocuments(autoClickRootDocument(), settings.includeFrames)), 900);
+            }
+        };
         const checkRemoteQuiz = () => {
-            if (!(settings.autoAnswerEnabled || settings.autoSubmitEnabled)) return false;
+            if (!(settings.autoAnswerEnabled || settings.autoSubmitEnabled || settings.videoQuizSkipOnFailure)) return false;
             if (remoteQuizPageUrl && remoteQuizPageUrl !== location.href) {
                 remoteQuizFrames = []; remoteQuizRequestedAt = 0; remoteQuizFirstRequestedAt = 0;
-                remoteQuizAnswered = false; remoteSubmitRequested = false; remoteQuizSubmitted = false;
+                remoteQuizAnswered = false; remoteQuizAnsweredAt = 0; remoteSubmitRequested = false; remoteQuizSubmitted = false;
                 remoteQuizWarnedAt = 0; remoteQuizRequestLogged = false; quizFrameWarned = false;
-                remoteQuizDetected = false; remoteProbeAt = 0; remoteProbeStartedAt = 0; remoteProbeWarned = false;
+                remoteQuizDetected = false; remoteQuizMidVideo = false; remoteProbeAt = 0; remoteProbeStartedAt = 0; remoteProbeWarned = false;
             }
             remoteQuizPageUrl = location.href;
-            if (remoteQuizSubmitted) return true;
+            if (remoteQuizSubmitted) return false;
             const root = autoClickRootDocument();
             const documents = autoClickDocuments(root, settings.includeFrames);
             if (!settings.bridgeToken) return false;
+            const midVideoNow = autoClickVideoInProgress(documents) || autoClickVideoQuizPresent(documents);
+            if (midVideoNow) remoteQuizMidVideo = true;
+            else if (!remoteQuizDetected && !remoteQuizAnswered) remoteQuizMidVideo = false;
+            const quizVisible = () => remoteQuizFrames.some(frame => {
+                try { return frame?.isConnected && autoClickVisible(frame); } catch { return false; }
+            }) || autoClickVideoQuizPresent(documents) || autoClickQuizFramePresent(documents) || autoClickQuestionNodes(documents).length > 0;
+            if (remoteQuizDetected && !remoteQuizAnswered && !remoteQuizRequestLogged && !quizVisible()) {
+                remoteQuizDetected = false;
+                remoteQuizFrames = [];
+                remoteQuizRequestedAt = 0;
+                remoteQuizFirstRequestedAt = 0;
+                remoteQuizRequestLogged = false;
+                remoteProbeAt = 0;
+                remoteProbeStartedAt = 0;
+            }
+            // 人工提交或平台自动关闭后，弹题会消失；确认消失再恢复翻节/播放，避免一直卡住。
+            if (remoteQuizAnswered && !remoteQuizSubmitted && remoteQuizAnsweredAt && remoteSubmitRequested && Date.now() - remoteQuizAnsweredAt > 1500) {
+                const stillVisible = remoteQuizFrames.some(frame => {
+                    try { return frame?.isConnected && autoClickVisible(frame); } catch { return false; }
+                });
+                if (!stillVisible && !autoClickVideoQuizPresent(documents) && !autoClickQuestionNodes(documents).length) {
+                    finishRemoteQuiz('视频弹题已处理，继续播放/翻节…');
+                    return true;
+                }
+            }
             // 优先找“一键生成答案”工具条真正挂载的同源 iframe：那里才能成功生成答案。
             // 顶层自己跑 runAnswerFlow 会因顶层没有题目容器而触发 CX-PAR-001。
             if (!remoteQuizDetected) {
@@ -9000,17 +9121,30 @@ Typr["U"] = {
                 }
             }
             if (!remoteQuizFirstRequestedAt) remoteQuizFirstRequestedAt = Date.now();
+            if (remoteQuizMidVideo && !settings.videoQuizAnswer) {
+                if (!quizVisible()) return false;
+                if (!remoteQuizWarnedAt || Date.now() - remoteQuizWarnedAt > 90000) {
+                    remoteQuizWarnedAt = Date.now();
+                    log('视频弹题自动答题已关闭，已暂停等待人工处理；处理后会自动继续', 'warn');
+                }
+                if (settings.videoQuizSkipOnFailure) {
+                    const closed = autoClickVideoQuizClose(documents);
+                    if (closed) finishRemoteQuiz('已自动关闭视频弹题，继续播放…');
+                }
+                return true;
+            }
             if (Date.now() - remoteQuizRequestedAt < 4000) return true;
             remoteQuizRequestedAt = Date.now();
             if (settings.autoAnswerEnabled && !remoteQuizAnswered) {
-                if (!remoteQuizRequestLogged && sendRemoteQuiz('answer', remoteQuizFrames)) {
+                const submitAfterAnswer = settings.autoSubmitEnabled && (!remoteQuizMidVideo || settings.videoQuizSubmit);
+                if (!remoteQuizRequestLogged && sendRemoteQuiz('answer', remoteQuizFrames, { submit: submitAfterAnswer })) {
                     remoteQuizRequestLogged = true;
-                    log('检测到跨域测验 iframe，正在请求它在内部自动点击“生成答案”…', 'warn');
+                    log(`检测到测验 iframe，正在请求它在内部自动点击“生成答案”${submitAfterAnswer ? '并提交' : '（只填写，不提交）'}…`, 'warn');
                 }
-            } else if (remoteQuizAnswered && !remoteSubmitRequested) {
+            } else if (remoteQuizAnswered && !remoteSubmitRequested && (!remoteQuizMidVideo || settings.videoQuizSubmit) && settings.autoSubmitEnabled) {
                 remoteSubmitRequested = true;
                 sendRemoteQuiz('submit', remoteQuizFrames);
-            } else if (!settings.autoAnswerEnabled && !remoteSubmitRequested) {
+            } else if (!settings.autoAnswerEnabled && !remoteSubmitRequested && (!remoteQuizMidVideo || settings.videoQuizSubmit) && settings.autoSubmitEnabled) {
                 remoteSubmitRequested = true;
                 sendRemoteQuiz('submit', remoteQuizFrames);
             }
@@ -9037,22 +9171,32 @@ Typr["U"] = {
             if (data.type === 'cx-auto-quiz-present') {
                 if (remoteQuizDetected) return;
                 remoteQuizDetected = true;
+                if (data.video || data.videoQuiz) remoteQuizMidVideo = true;
                 const source = remoteQuizFrames.find(frame => { try { return frame.contentWindow === event.source; } catch { return false; } });
                 if (source) remoteQuizFrames = [source];
                 remoteQuizFirstRequestedAt = Date.now();
-                log(`检测到跨域测验 iframe（${data.total || '?'} 题），开始自动生成答案…`, 'warn');
+                const autoAnswer = settings.autoAnswerEnabled && (!remoteQuizMidVideo || settings.videoQuizAnswer);
+                log(autoAnswer ? `检测到跨域测验 iframe（${data.total || '?'} 题），开始自动生成答案…` : `检测到跨域测验 iframe（${data.total || '?'} 题），按设置等待人工处理…`, 'warn');
                 return;
             }
             if (data.type === 'cx-auto-quiz-answered') {
                 if (remoteQuizAnswered) return;
                 remoteQuizAnswered = true;
+                remoteQuizAnsweredAt = Date.now();
                 remoteQuizDetected = true;
                 remoteQuizWarnedAt = Date.now();
                 if (data.ok) {
-                    // 生成流程成功即请求提交；是否填完由 iframe 内与工具条相同的流程自己判断。
-                    log(`测验 iframe 已完成“生成答案”（${data.total || '?'} 题，填写 ${data.filled ?? '?'} 题），请求提交…`, 'hit');
-                    remoteSubmitRequested = true;
-                    sendRemoteQuiz('submit');
+                    const manual = data.manualSubmit === true || (remoteQuizMidVideo && (!settings.videoQuizSubmit || !settings.autoSubmitEnabled));
+                    if (manual) {
+                        remoteSubmitRequested = true;
+                        const where = remoteQuizMidVideo ? '视频弹题' : '测验 iframe';
+                        log(`${where}已填写 ${data.filled ?? '?'}/${data.total ?? '?'} 题；请在页面中手动提交，提交后会自动继续`, 'warn');
+                    } else {
+                        // 生成流程成功即请求提交；是否填完由 iframe 内与工具条相同的流程自己判断。
+                        log(`测验 iframe 已完成“生成答案”（${data.total || '?'} 题，填写 ${data.filled ?? '?'} 题），请求提交…`, 'hit');
+                        remoteSubmitRequested = true;
+                        sendRemoteQuiz('submit');
+                    }
                 } else {
                     remoteSubmitRequested = true;
                     log(`测验 iframe 生成答案未成功：${data.reason || '未知原因'}；暂不提交`, 'err');
@@ -9062,18 +9206,39 @@ Typr["U"] = {
             if (data.type === 'cx-auto-quiz-submitted') {
                 if (remoteQuizSubmitted) return;
                 remoteQuizDetected = true;
+                remoteQuizAnswered = true;
+                remoteQuizAnsweredAt = Date.now();
                 remoteQuizWarnedAt = Date.now();
                 if (data.ok === false) {
-                    remoteQuizSubmitted = true;
                     remoteSubmitRequested = true;
-                    log(`跨域测验 iframe 提交未完成：${data.reason || '未知原因'}；已暂停翻节`, 'err');
+                    let closed = null;
+                    let parentButton = null;
+                    if (data.reason === 'no-submit') {
+                        try { parentButton = autoClickVideoQuizSubmit(autoClickRootDocument()); } catch { parentButton = null; }
+                    }
+                    if (parentButton && autoClickNode(parentButton)) {
+                        log('提交按钮不在测验 iframe 内，已在当前页面点击提交；等待弹题关闭…', 'warn');
+                        return;
+                    }
+                    if (remoteQuizMidVideo && settings.videoQuizSkipOnFailure) {
+                        try { closed = autoClickVideoQuizClose(autoClickDocuments(autoClickRootDocument(), settings.includeFrames)); } catch { closed = null; }
+                    }
+                    if (closed) {
+                        finishRemoteQuiz('提交按钮未找到，已自动关闭弹题并继续播放…');
+                    } else {
+                        const where = remoteQuizMidVideo ? '视频弹题' : '测验 iframe';
+                        log(`${where}提交未完成：${data.reason || '未知原因'}；请手动提交，提交后会自动继续`, 'warn');
+                    }
                     return;
                 }
                 remoteQuizSubmitted = true;
                 if (data.confirmed) {
+                    remoteQuizDetected = false;
+                    remoteQuizFrames = [];
                     postSubmitConfirmed = true;
-                    if (settings.autoNextEnabled) postSubmitNextAt = Date.now() + settings.postSubmitDelayMs;
+                    if (settings.autoNextEnabled && !remoteQuizMidVideo) postSubmitNextAt = Date.now() + settings.postSubmitDelayMs;
                     log('跨域测验 iframe 已提交并确认，等待后进入下一节', 'hit');
+                    if (settings.videoQuizResume && remoteQuizMidVideo) doc.defaultView?.setTimeout(() => autoClickResumeVideo(autoClickDocuments(autoClickRootDocument(), settings.includeFrames)), 1200);
                 } else {
                     postSubmitConfirmed = false;
                     confirmWatch = { until: Date.now() + 22000 };
@@ -9082,9 +9247,12 @@ Typr["U"] = {
                 return;
             }
             if (data.type === 'cx-auto-quiz-confirmed') {
+                remoteQuizDetected = false;
+                remoteQuizFrames = [];
                 postSubmitConfirmed = true;
-                if (settings.autoNextEnabled) postSubmitNextAt = Date.now() + settings.postSubmitDelayMs;
+                if (settings.autoNextEnabled && !remoteQuizMidVideo) postSubmitNextAt = Date.now() + settings.postSubmitDelayMs;
                 log('跨域测验 iframe 已确认提交，等待后进入下一节', 'hit');
+                if (settings.videoQuizResume && remoteQuizMidVideo) doc.defaultView?.setTimeout(() => autoClickResumeVideo(autoClickDocuments(autoClickRootDocument(), settings.includeFrames)), 1200);
             }
         };
         const checkVideoEnded = () => {
@@ -9217,7 +9385,10 @@ Typr["U"] = {
             if (Date.now() > confirmWatch.until) {
                 confirmWatch = null;
                 postSubmitConfirmed = false;
-                if (settings.autoNextEnabled) postSubmitNextAt = Date.now() + settings.postSubmitDelayMs;
+                remoteQuizDetected = false;
+                remoteQuizFrames = [];
+                if (settings.autoNextEnabled && !remoteQuizMidVideo) postSubmitNextAt = Date.now() + settings.postSubmitDelayMs;
+                if (settings.videoQuizResume && remoteQuizMidVideo) doc.defaultView?.setTimeout(() => autoClickResumeVideo(autoClickDocuments(autoClickRootDocument(), settings.includeFrames)), 900);
                 log('提交后未发现确认弹窗；若页面已跳转或显示提交成功可忽略', 'warn');
                 return false;
             }
@@ -9228,7 +9399,7 @@ Typr["U"] = {
                 log(`已自动确认提交弹窗：${autoClickText(button)}`, 'hit');
                 confirmWatch = null;
                 postSubmitConfirmed = true;
-                if (settings.autoNextEnabled) postSubmitNextAt = Date.now() + settings.postSubmitDelayMs;
+                if (settings.autoNextEnabled && !remoteQuizMidVideo) postSubmitNextAt = Date.now() + settings.postSubmitDelayMs;
                 return true;
             }
             return false;
@@ -9539,7 +9710,7 @@ Typr["U"] = {
             endedVideos = new WeakMap();
             submitReadySince = 0; submitSignature = ''; submitMissingLogged = ''; confirmWatch = null; dryRunSubmitLogged.clear();
             postSubmitNextAt = 0; postSubmitWarned = false; postSubmitConfirmed = false; autoAnswerWarned = ''; lastNextQuestionAt = 0; quizFrameWarned = false; autoAnswerAttempted.clear();
-            remoteQuizFrames = []; remoteQuizRequestedAt = 0; remoteQuizFirstRequestedAt = 0; remoteQuizAnswered = false; remoteSubmitRequested = false; remoteQuizSubmitted = false; remoteQuizWarnedAt = 0; remoteQuizRequestLogged = false; remoteQuizPageUrl = ''; remoteQuizDetected = false; remoteProbeAt = 0; remoteProbeStartedAt = 0; remoteProbeWarned = false;
+            remoteQuizFrames = []; remoteQuizRequestedAt = 0; remoteQuizFirstRequestedAt = 0; remoteQuizAnswered = false; remoteQuizAnsweredAt = 0; remoteSubmitRequested = false; remoteQuizSubmitted = false; remoteQuizWarnedAt = 0; remoteQuizRequestLogged = false; remoteQuizPageUrl = ''; remoteQuizDetected = false; remoteQuizMidVideo = false; remoteProbeAt = 0; remoteProbeStartedAt = 0; remoteProbeWarned = false;
             setRunningUI(true);
             paintLauncher(true);
             const smartStatus = [
@@ -10481,14 +10652,14 @@ Typr["U"] = {
           @media(prefers-reduced-motion:reduce){#status-spinner{animation:none}}
           .auto-rule-text{width:100%;min-height:78px;max-height:150px;resize:vertical;border:1px solid #cbd5e3;border-radius:6px;padding:8px;background:#fff;color:var(--ink);font:13px/1.55 "Microsoft YaHei","PingFang SC",monospace;box-sizing:border-box}.auto-rule-text.compact{min-height:54px;max-height:108px}
           .auto-rule-text:focus-visible{outline:2px solid #729adc;outline-offset:1px}.auto-rule-text:disabled{background:#f5f7fb;color:#8b98aa}
-          .auto-trigger-title{display:flex;align-items:center;gap:8px;font-weight:700;margin-bottom:10px}.auto-sep{border:0;border-top:1px solid var(--line);margin:14px 0}.auto-trigger-hint{font-size:12px;color:var(--muted);margin:4px 0 8px}
+          .auto-trigger-title{display:flex;align-items:center;gap:8px;font-weight:700;margin-bottom:10px}.auto-sep{border:0;border-top:1px solid var(--line);margin:14px 0}.auto-trigger-hint{font-size:12px;color:var(--muted);margin:4px 0 8px}.auto-video-quiz-block{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:10px 0;background:rgba(49,95,189,.04)}
           .auto-click-log{min-height:88px;max-height:190px;overflow:auto;border:1px solid var(--line);border-radius:7px;background:#fbfcfe;padding:8px 10px;font-size:12px;line-height:1.55;overscroll-behavior:contain}
           .auto-click-log p{margin:0 0 3px;display:block;overflow-wrap:anywhere}.auto-click-log .time{color:#8b98aa;margin-right:5px;font-variant-numeric:tabular-nums}.auto-click-log .hit{color:#226342}.auto-click-log .warn{color:#996021}.auto-click-log .err{color:#b13b32}.auto-click-log .empty{color:#8290a1}
           .auto-danger{color:#a44932}.auto-click-pick-tip{position:fixed;z-index:2147483647;left:50%;top:14px;transform:translateX(-50%);max-width:min(520px,calc(100vw - 24px));padding:9px 14px;border-radius:8px;background:#1f2f4a;color:#fff;font:13px/1.5 "Microsoft YaHei","PingFang SC",sans-serif;box-shadow:0 8px 28px #0b1b3333;pointer-events:none;text-align:center}
           #floating-launcher{position:fixed;display:flex;align-items:center;justify-content:center;width:44px;height:44px;min-height:0;padding:8px;border:1px solid #c53e3e;border-radius:50%;background:#d94a4a;color:#fff;box-shadow:0 6px 24px #b8333333;cursor:pointer;touch-action:none;user-select:none}#floating-launcher:hover{background:#c93d3d;border-color:#b93232}#floating-launcher:active{cursor:grabbing}#floating-launcher svg{width:26px;height:26px;pointer-events:none}.floating-dot{position:absolute;right:3px;top:3px;width:7px;height:7px;border:2px solid #fff;border-radius:50%;background:#92a1b6;pointer-events:none}#floating-launcher[data-busy=true] .floating-dot{background:#315fbd}#floating-launcher[data-phase=error] .floating-dot{background:#bd6848}#floating-launcher[data-autoclick=running] .floating-dot{background:#2e9b62}
         </style>
         <div id="panel" hidden data-active-view="questions">
-          <header class="head"><strong>学习通全自动学习 v1.1</strong><div class="head-actions">
+          <header class="head"><strong>学习通全自动学习 v1.2</strong><div class="head-actions">
             <button type="button" id="download-update" class="secondary" title="下载更新" aria-label="下载更新" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg></button>
             <button type="button" id="github" class="secondary" title="GitHub 个人主页" aria-label="GitHub 个人主页"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .75a11.25 11.25 0 0 0-3.558 21.923c.563.104.768-.244.768-.543v-2.096c-3.13.68-3.791-1.329-3.791-1.329-.512-1.3-1.25-1.646-1.25-1.646-1.022-.699.077-.685.077-.685 1.23.08 1.725 1.23 1.725 1.23 1.005 1.722 2.637 1.234 3.279.936.102-.728.393-1.235.715-1.507-2.499-.284-5.126-1.25-5.126-5.566 0-1.23.44-2.232 1.23-3.02-.116-.285-.503-1.43.111-2.98 0 0 .945-.302 3.094 1.233a10.78 10.78 0 0 1 5.625 0c2.149-1.455 3.092-1.233 3.092-1.233.615 1.55.228 2.695.112 2.98.722.788 1.239 1.79 1.239 3.02 0 4.327-2.631 5.279-5.138 5.558.404.35.763 1.04.763 2.097v3.078c0 .302.203.653.774.542A11.252 11.252 0 0 0 12 .75Z"/></svg></button>
             <button type="button" id="about-toggle" class="secondary" aria-label="项目介绍" aria-expanded="false" title="项目介绍">?</button>
@@ -10569,6 +10740,14 @@ Typr["U"] = {
                   <div class="auto-trigger-title">智能联动 <span class="view-tag">一次授权</span></div>
                   <label class="check-label"><input type="checkbox" id="auto-answer-enabled" /> 识别题目并自动点击“生成答案”，等待填写完成（调用已配置的 AI）</label>
                   <p class="auto-trigger-hint">需要先在“模型设置”里保存 API Key 和模型；AI 分析期间不会提交。</p>
+                  <div class="auto-video-quiz-block">
+                    <div class="auto-trigger-title">视频中途弹题 <span class="view-tag">按课程选择</span></div>
+                    <label class="check-label"><input type="checkbox" id="auto-video-quiz-answer" /> 自动生成并填写答案</label>
+                    <label class="check-label"><input type="checkbox" id="auto-video-quiz-submit" /> 填写完成后自动提交</label>
+                    <label class="check-label"><input type="checkbox" id="auto-video-quiz-resume" /> 提交后继续播放视频</label>
+                    <label class="check-label"><input type="checkbox" id="auto-video-quiz-skip" /> 处理失败时自动关闭弹题（可能误关，不推荐）</label>
+                    <p class="auto-trigger-hint">如果课程弹题必须人工确认，取消“自动提交”；脚本会填好答案后暂停，等你提交。没有“关闭/跳过”按钮的课程，不要勾最后一项。</p>
+                  </div>
                   <label class="check-label"><input type="checkbox" id="auto-next-enabled" /> 视频播放完毕 → 自动点击“下一节”</label>
                   <label class="field-caption" for="auto-next-rules">下一节按钮（每行一个）</label>
                   <textarea id="auto-next-rules" class="auto-rule-text compact" spellcheck="false" placeholder="下一节&#10;下一集&#10;css:.next-btn"></textarea>
@@ -11560,7 +11739,7 @@ Typr["U"] = {
     function installQuizAutoBridge(ctl) {
         if (window.top === window.self || window.__cxQuizAutoBridgeInstalled) return;
         window.__cxQuizAutoBridgeInstalled = true;
-        let busy = false, autoStarted = false, autoSeenAt = 0;
+        let busy = false, autoStarted = false, autoSeenAt = 0, submitAfterAnswer = true;
         const post = data => {
             try { window.top.postMessage(data, '*'); } catch { /* 顶层不可达。 */ }
         };
@@ -11584,7 +11763,11 @@ Typr["U"] = {
         const submitNow = token => {
             const settings = autoClickSettings();
             // 按用户要求：不再自行判断题目是否填完；生成答案流程成功后即点击提交。
-            const button = autoClickFindAction(document, parseAutoClickRules(settings.submitRules), { ...settings, allowDanger: true });
+            let button = autoClickFindAction(document, parseAutoClickRules(settings.submitRules), { ...settings, allowDanger: true });
+            if (!button?.node) {
+                const fallback = autoClickVideoQuizSubmit(document);
+                if (fallback) button = { node: fallback, text: autoClickText(fallback) };
+            }
             if (!button?.node) {
                 post({ type: 'cx-auto-quiz-submitted', token, ok: false, reason: 'no-submit' });
                 return;
@@ -11629,8 +11812,8 @@ Typr["U"] = {
                     return;
                 }
                 const settings = autoClickSettings();
-                if (settings.autoSubmitEnabled) submitNow(token);
-                else post({ type: 'cx-auto-quiz-answered', token, ok: true, allFilled: true, total: result.total, filled: result.filled });
+                if (settings.autoSubmitEnabled && submitAfterAnswer) submitNow(token);
+                else post({ type: 'cx-auto-quiz-answered', token, ok: true, allFilled: true, manualSubmit: true, total: result.total, filled: result.filled });
             } catch (error) {
                 post({ type: 'cx-auto-quiz-answered', token, ok: false, reason: String(error?.message || error) });
             } finally {
@@ -11649,11 +11832,18 @@ Typr["U"] = {
                 // 用与“一键生成答案”工具条完全相同的识别条件；识别不了的框架绝不回应，避免找错框架后触发 CX-PAR-001。
                 if (!hasQuestionNodes(document)) return;
                 const nodes = autoClickQuestionNodes([document]);
-                post({ type: 'cx-auto-quiz-present', token: data.token, total: nodes.length || 1 });
+                const videoActive = [...document.querySelectorAll('video')].some(video => {
+                    const duration = Number(video.duration);
+                    return video.isConnected && Number.isFinite(duration) && duration > 5 && !video.ended
+                        && (Number(video.currentTime) > 0 || !video.paused);
+                });
+                const videoQuiz = Boolean(document.querySelector('.ans-videoquiz,[data-video-quiz-root],#videoquiz-submit'));
+                post({ type: 'cx-auto-quiz-present', token: data.token, total: nodes.length || 1, video: videoActive, videoQuiz });
                 return;
             }
             if (data.type === 'cx-auto-quiz-answer') {
                 if (!settings.autoAnswerEnabled || busy) return;
+                submitAfterAnswer = data.submit !== false;
                 if (ctl.state?.busy) {
                     post({ type: 'cx-auto-quiz-answered', token: data.token, ok: false, reason: 'busy' });
                     return;
