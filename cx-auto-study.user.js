@@ -5,8 +5,8 @@
 // @supportURL   https://github.com/L-ty-34/cx-auto-study/issues
 // @updateURL    https://raw.githubusercontent.com/L-ty-34/cx-auto-study/main/cx-auto-study.user.js
 // @downloadURL  https://raw.githubusercontent.com/L-ty-34/cx-auto-study/main/cx-auto-study.user.js
-// @version      1.2
-// @description  学习通全自动学习：视频自动播放、自动翻节、自动答题与提交、托管视频不暂停（基于 1.23 修改版）
+// @version      1.4
+// @description  学习通全自动学习：视频自动播放、自动翻节、自动答题与提交、托管视频不暂停/自动静音（基于 1.23 修改版）
 // @match        *://*.chaoxing.com/*
 // @match        *://*.xuexitong.com/*
 // @match        *://*.edu.cn/work/doHomeWorkNew*
@@ -2910,7 +2910,7 @@ Typr["U"] = {
 
     const ROOT_ID = 'cx-ai-study-root';
     const UI_HIDDEN_KEY = 'cx_ui_hidden';
-    const ASSISTANT_VERSION = '1.2';
+    const ASSISTANT_VERSION = '1.4';
     const QUESTION_SELECTOR = '.singleQuesId,.TiMu,.question-item[data-question-id],[data-questionid]';
     const DEEPSEEK_BASE = 'https://api.deepseek.com';
     const DEEPSEEK_SEARCH_URL = `${DEEPSEEK_BASE}/anthropic/v1/messages`;
@@ -8429,6 +8429,7 @@ Typr["U"] = {
             postSubmitDelayMs: autoClickLimit(saved.postSubmitDelayMs, 1000, 30000, 4000),
             autoConfirmSubmit: saved.autoConfirmSubmit !== false,
             keepVideoPlaying: saved.keepVideoPlaying === true,
+            muteVideo: saved.muteVideo === true,
             smartConsent: saved.smartConsent === true,
             armed: saved.armed === true
         };
@@ -8823,14 +8824,16 @@ Typr["U"] = {
     }
     function initAutoClickControls(shadow, doc, ctl) {
         const el = id => shadow.getElementById(id);
-        const controlIDs = ['auto-click-rules', 'auto-click-exact', 'auto-click-frames', 'auto-click-interval', 'auto-click-cooldown', 'auto-click-max', 'auto-click-dry-run', 'auto-click-allow-danger', 'auto-answer-enabled', 'auto-video-quiz-answer', 'auto-video-quiz-submit', 'auto-video-quiz-resume', 'auto-video-quiz-skip', 'auto-next-enabled', 'auto-next-rules', 'auto-submit-enabled', 'auto-submit-rules', 'auto-submit-delay', 'auto-post-delay', 'auto-confirm-submit', 'auto-keep-video-playing', 'auto-smart-consent'];
+        const controlIDs = ['auto-click-rules', 'auto-click-exact', 'auto-click-frames', 'auto-click-interval', 'auto-click-cooldown', 'auto-click-max', 'auto-click-dry-run', 'auto-click-allow-danger', 'auto-answer-enabled', 'auto-video-quiz-answer', 'auto-video-quiz-submit', 'auto-video-quiz-resume', 'auto-video-quiz-skip', 'auto-next-enabled', 'auto-next-rules', 'auto-submit-enabled', 'auto-submit-rules', 'auto-submit-delay', 'auto-post-delay', 'auto-confirm-submit', 'auto-keep-video-playing', 'auto-mute-video', 'auto-smart-consent'];
         const logBox = el('auto-click-log'), statusNode = el('auto-click-status');
         let settings = autoClickSettings(), running = false, timer = null, clicks = 0;
         let lastHitKey = '', lastHighlightAt = 0, pickCleanup = null;
         let endedVideos = new WeakMap(), submitReadySince = 0, submitSignature = '', submitMissingLogged = '', confirmWatch = null, pendingVideoStartAt = 0;
         let smartVideo = null, smartVideoRelease = null, smartVideoLogged = false, smartVideoSuppressed = false;
+        let mutedVideoStates = new Map(), muteVideoLogged = false;
         let postSubmitNextAt = 0, postSubmitWarned = false, postSubmitConfirmed = false, autoAnswerWarned = '', lastNextQuestionAt = 0, quizFrameWarned = false;
         let remoteQuizFrames = [], remoteQuizRequestedAt = 0, remoteQuizFirstRequestedAt = 0, remoteQuizAnswered = false, remoteQuizAnsweredAt = 0, remoteSubmitRequested = false, remoteQuizSubmitted = false, remoteQuizWarnedAt = 0, remoteQuizRequestLogged = false, remoteQuizPageUrl = '', remoteQuizDetected = false, remoteQuizMidVideo = false, remoteProbeAt = 0, remoteProbeStartedAt = 0, remoteProbeWarned = false;
+        let localVideoQuiz = null, localVideoQuizDone = new Set(), localVideoQuizWarnedAt = 0;
         const lastClicks = new WeakMap(), submittedQuizzes = new Set(), dryRunSubmitLogged = new Set(), autoAnswerAttempted = new Set();
         const TAB_ID = (() => {
             try {
@@ -8908,6 +8911,7 @@ Typr["U"] = {
             el('auto-post-delay').value = Math.round(settings.postSubmitDelayMs / 1000);
             el('auto-confirm-submit').checked = settings.autoConfirmSubmit;
             el('auto-keep-video-playing').checked = settings.keepVideoPlaying;
+            el('auto-mute-video').checked = settings.muteVideo;
             el('auto-smart-consent').checked = settings.smartConsent;
         };
         const readSettings = () => normalizeAutoClickSettings({
@@ -8933,6 +8937,7 @@ Typr["U"] = {
             postSubmitDelayMs: Number(el('auto-post-delay').value) * 1000,
             autoConfirmSubmit: el('auto-confirm-submit').checked,
             keepVideoPlaying: el('auto-keep-video-playing').checked,
+            muteVideo: el('auto-mute-video').checked,
             smartConsent: el('auto-smart-consent').checked,
             armed: settings.armed
         });
@@ -8954,7 +8959,10 @@ Typr["U"] = {
             running = false;
             set(AUTO_RUN_SIGNAL_KEY, 0);
             if (timer !== null) { doc.defaultView?.clearTimeout(timer); timer = null; }
+            try { localVideoQuiz?.abort?.abort(); } catch { /* 分析已结束。 */ }
+            localVideoQuiz = null;
             releaseSmartVideo();
+            restoreVideoMute();
             smartVideoLogged = false;
             smartVideoSuppressed = false;
             if (disarm) {
@@ -8969,12 +8977,228 @@ Typr["U"] = {
             setStatus(`已停止 · ${reason}`);
             log(reason, 'warn');
         };
+        // 视频页内直接弹出的“视频弹题”不是章节测验页，旧的“一键生成答案”工具条不会出现。
+        // 这里直接读弹题 DOM、调用已配置的模型，填写后按选项提交，不依赖测验 iframe。
+        const localVideoQuizSleep = ms => new Promise(resolve => doc.defaultView?.setTimeout(resolve, ms) ?? setTimeout(resolve, ms));
+        const findLocalVideoQuiz = () => {
+            const rootDoc = autoClickRootDocument();
+            let documents = [rootDoc];
+            try { documents = autoClickDocuments(rootDoc, settings.includeFrames); } catch { /* 单页兜底。 */ }
+            for (const document of documents) {
+                let roots = [];
+                try { roots = [...document.querySelectorAll(VIDEO_QUIZ_ROOT)].filter(autoClickVisible); } catch { continue; }
+                // 有些课程把弹题放在通用 dialog/form 里，只保留提交按钮；按提交按钮向上找弹题容器。
+                try {
+                    for (const button of document.querySelectorAll('#videoquiz-submit,[data-video-quiz-submit]')) {
+                        if (!autoClickVisible(button)) continue;
+                        const root = button.closest(`${VIDEO_QUIZ_ROOT},[role="dialog"],form,.videoquiz,.video-quiz`);
+                        if (root && autoClickVisible(root) && !roots.includes(root)) roots.push(root);
+                    }
+                } catch { /* 忽略异常结构。 */ }
+                if (!roots.length) continue;
+                let videos = [];
+                try { videos = [...document.querySelectorAll('video')].filter(video => video.isConnected && autoClickVisible(video)); } catch { continue; }
+                for (const video of videos) {
+                    try {
+                        const candidate = courseVideoQuizCandidate(video);
+                        if (candidate && roots.includes(candidate.root)) return { candidate, video };
+                    } catch { /* 继续找其它视频。 */ }
+                }
+                // 弹题层不一定包在播放器容器内；按可见弹题 + 当前页视频兜底。
+                if (videos.length) {
+                    return { candidate: { root: roots[0], doc: document, video: videos[0], holder: videos[0].parentElement }, video: videos[0] };
+                }
+            }
+            return null;
+        };
+        const resumeLocalVideo = () => {
+            if (!settings.videoQuizResume) return;
+            doc.defaultView?.setTimeout(() => {
+                try { autoClickResumeVideo(autoClickDocuments(autoClickRootDocument(), settings.includeFrames)); } catch { /* 播放器已卸载。 */ }
+            }, 900);
+        };
+        const finishLocalVideoQuiz = (task, message) => {
+            if (!task || task.done) return;
+            task.done = true;
+            localVideoQuizDone.add(task.key);
+            if (localVideoQuiz === task) localVideoQuiz = null;
+            log(message, 'hit');
+            resumeLocalVideo();
+        };
+        const closeLocalVideoQuiz = (task, why) => {
+            let closed = false;
+            try { closed = autoClickVideoQuizClose(autoClickDocuments(autoClickRootDocument(), settings.includeFrames)); } catch { closed = false; }
+            if (closed) finishLocalVideoQuiz(task, `视频弹题${why}，已关闭并继续播放…`);
+            else {
+                task.phase = 'manual';
+                log(`视频弹题${why}，但没有找到关闭按钮，请手动处理`, 'warn');
+            }
+            return closed;
+        };
+        const checkLocalVideoQuiz = () => {
+            const found = findLocalVideoQuiz();
+            if (localVideoQuiz) {
+                if (found) {
+                    localVideoQuiz.lastSeenAt = Date.now();
+                    return true;
+                }
+                if (localVideoQuiz.phase === 'answering') return true;
+                if (Date.now() - localVideoQuiz.lastSeenAt > 1200) {
+                    const task = localVideoQuiz;
+                    localVideoQuiz = null;
+                    localVideoQuizDone.add(task.key);
+                    log(task.submitted || task.phase === 'manual-submit' ? '视频弹题已关闭，继续播放视频…' : '视频弹题已关闭，继续…', 'hit');
+                    resumeLocalVideo();
+                }
+                return true;
+            }
+            if (!found) {
+                localVideoQuizDone.clear();
+                return false;
+            }
+            let snapshot;
+            try { snapshot = courseVideoQuizSnapshot(found.candidate); }
+            catch (error) {
+                if (!localVideoQuizWarnedAt || Date.now() - localVideoQuizWarnedAt > 60000) {
+                    localVideoQuizWarnedAt = Date.now();
+                    log(`检测到视频弹题，但无法读取题目：${error?.message || error}`, 'warn');
+                }
+                return true;
+            }
+            if (localVideoQuizDone.has(snapshot.key)) return true;
+            const task = { key: snapshot.key, snapshot, candidate: found.candidate, video: found.video, phase: 'answering', abort: new AbortController(), lastSeenAt: Date.now(), submitted: false, done: false };
+            localVideoQuiz = task;
+            if (!settings.videoQuizAnswer || !settings.autoAnswerEnabled) {
+                task.phase = 'manual';
+                if (!localVideoQuizWarnedAt || Date.now() - localVideoQuizWarnedAt > 90000) {
+                    localVideoQuizWarnedAt = Date.now();
+                    log('视频弹题自动答题已关闭，已暂停等待人工处理；处理后会自动继续', 'warn');
+                }
+                if (settings.videoQuizSkipOnFailure) closeLocalVideoQuiz(task, '按设置跳过');
+                return true;
+            }
+            if (settings.dryRun) {
+                task.phase = 'manual';
+                log('试运行命中视频弹题（未填写、未提交）', 'hit');
+                return true;
+            }
+            const analysis = currentAnalysisSettings();
+            if (!analysis?.key || !analysis?.model) {
+                task.phase = 'manual';
+                log('检测到视频弹题，但还没有配置模型 API Key；请到“模型设置”配置后重新开始', 'warn');
+                return true;
+            }
+            void (async () => {
+                try {
+                    log(`视频弹题：开始分析 ${snapshot.questions.length} 题…`, 'warn');
+                    const result = await solveQuestionBatches(snapshot, { ...analysis, signal: task.abort.signal }, message => {
+                        if (!task.abort.signal.aborted && running) log(`视频弹题：${message}`, 'warn');
+                    }, { retryTransient: true });
+                    if (task.abort.signal.aborted || !running) return;
+                    const answers = result?.answers || [];
+                    if (!answers.some(answer => answer.answer?.length)) throw new Error('模型没有返回有效答案');
+                    log('视频弹题：答案已生成，正在填写…', 'hit');
+                    const summary = await prefillChecked(snapshot, answers);
+                    if (task.abort.signal.aborted || !running) return;
+                    if (summary.skipped || summary.unverified || summary.filled + summary.already !== snapshot.questions.length) {
+                        task.phase = 'manual';
+                        log('视频弹题有题目未能自动填写，已暂停等待人工检查', 'warn');
+                        return;
+                    }
+                    task.phase = 'filled';
+                    if (!settings.videoQuizSubmit || !settings.autoSubmitEnabled) {
+                        task.phase = 'manual-submit';
+                        log('视频弹题已填写，等待你手动提交；提交后会自动继续', 'warn');
+                        return;
+                    }
+                    const current = courseVideoQuizCandidate(task.video) || task.candidate;
+                    let button = null;
+                    try { button = courseVideoQuizButton(current, 'submit'); } catch { button = null; }
+                    if (!button) {
+                        try { button = autoClickVideoQuizSubmit(current.root); } catch { button = null; }
+                    }
+                    if (!button) {
+                        task.phase = 'manual-submit';
+                        log('视频弹题已填写，但没有找到提交按钮；请手动提交，提交后会自动继续', 'warn');
+                        return;
+                    }
+                    task.submitted = true;
+                    task.phase = 'submitted';
+                    log('视频弹题：已点击提交，等待结果…', 'hit');
+                    if (!autoClickNode(button)) {
+                        try { button.click(); } catch { /* 按钮已消失。 */ }
+                    }
+                    const startedAt = Date.now();
+                    while (running && !task.abort.signal.aborted && Date.now() - startedAt < 25000) {
+                        await localVideoQuizSleep(500);
+                        const now = findLocalVideoQuiz();
+                        if (!now) {
+                            finishLocalVideoQuiz(task, '视频弹题已提交并关闭，继续播放视频…');
+                            return;
+                        }
+                        task.lastSeenAt = Date.now();
+                        let continueButton = null;
+                        try { continueButton = courseVideoQuizButton(now.candidate, 'continue'); } catch { continueButton = null; }
+                        if (continueButton) {
+                            log('视频弹题：点击继续…', 'hit');
+                            try { autoClickNode(continueButton); } catch { /* 已消失。 */ }
+                        }
+                        let feedback = '';
+                        try { feedback = courseVideoQuizFeedback(now.candidate); } catch { feedback = ''; }
+                        if (/(?:回答|作答|答案|选择|答题)(?:结果)?[：:，,\s]*(?:错误|不正确|不完全正确)|回答不对|答错/.test(feedback)) {
+                            task.phase = 'manual';
+                            log(`视频弹题提交后反馈：${feedback.slice(0, 120)}；请人工处理`, 'warn');
+                            return;
+                        }
+                    }
+                    if (running && !task.abort.signal.aborted) {
+                        task.phase = 'manual';
+                        log('视频弹题提交后仍未关闭，请手动检查；处理后会自动继续', 'warn');
+                    }
+                } catch (error) {
+                    if (task.abort.signal.aborted || !running) return;
+                    task.phase = 'manual';
+                    log(`视频弹题自动处理失败：${error?.message || error}`, 'err');
+                    if (settings.videoQuizSkipOnFailure) closeLocalVideoQuiz(task, '处理失败');
+                }
+            })();
+            return true;
+        };
         const releaseSmartVideo = () => {
             if (smartVideoRelease) {
                 try { smartVideoRelease(); } catch { /* 已释放。 */ }
                 smartVideoRelease = null;
             }
             smartVideo = null;
+        };
+        const restoreVideoMute = () => {
+            for (const [video, muted] of mutedVideoStates) {
+                try { if (video.isConnected) video.muted = muted; } catch { /* 播放器已卸载。 */ }
+            }
+            mutedVideoStates.clear();
+            muteVideoLogged = false;
+        };
+        const syncVideoMute = () => {
+            if (!running || !settings.muteVideo) { restoreVideoMute(); return; }
+            let documents;
+            try { documents = autoClickDocuments(autoClickRootDocument(), settings.includeFrames); } catch { return; }
+            let changed = false;
+            for (const document of documents) {
+                let videos;
+                try { videos = [...document.querySelectorAll('video')]; } catch { continue; }
+                for (const video of videos) {
+                    if (!video.isConnected) continue;
+                    if (!mutedVideoStates.has(video)) mutedVideoStates.set(video, video.muted);
+                    if (!video.muted) {
+                        try { video.muted = true; changed = true; } catch { /* 不允许改音量。 */ }
+                    }
+                }
+            }
+            for (const video of mutedVideoStates.keys()) if (!video.isConnected) mutedVideoStates.delete(video);
+            if (changed && !muteVideoLogged) {
+                muteVideoLogged = true;
+                log('视频静音已开启：托管期间视频保持静音，停止后恢复原状态', 'hit');
+            }
         };
         const syncVideoProtection = () => {
             if (!running || !settings.keepVideoPlaying) { releaseSmartVideo(); return; }
@@ -9584,12 +9808,17 @@ Typr["U"] = {
                 if (panelView.windowMode !== 'open' && !(panelView.windowMode === 'minimized' && settings.armed)) { stop('面板已收起'); return; }
                 set(AUTO_RUN_SIGNAL_KEY, Date.now());
                 syncVideoProtection();
+                syncVideoMute();
                 checkPendingVideoStart();
                 if (confirmWatch && checkSubmitConfirmation()) {
                     if (running) timer = doc.defaultView?.setTimeout(tick, settings.intervalMs) ?? setTimeout(tick, settings.intervalMs);
                     return;
                 }
                 if (checkPostSubmitNext()) {
+                    if (running) timer = doc.defaultView?.setTimeout(tick, settings.intervalMs) ?? setTimeout(tick, settings.intervalMs);
+                    return;
+                }
+                if (checkLocalVideoQuiz()) {
                     if (running) timer = doc.defaultView?.setTimeout(tick, settings.intervalMs) ?? setTimeout(tick, settings.intervalMs);
                     return;
                 }
@@ -9705,12 +9934,15 @@ Typr["U"] = {
             if (!claimTab()) { setStatus('未开始 · 另一个标签页托管中'); return; }
             running = true; clicks = 0; lastHitKey = ''; lastHighlightAt = 0;
             releaseSmartVideo();
+            restoreVideoMute();
+            muteVideoLogged = false;
             smartVideoLogged = false;
             smartVideoSuppressed = false;
             endedVideos = new WeakMap();
             submitReadySince = 0; submitSignature = ''; submitMissingLogged = ''; confirmWatch = null; dryRunSubmitLogged.clear();
             postSubmitNextAt = 0; postSubmitWarned = false; postSubmitConfirmed = false; autoAnswerWarned = ''; lastNextQuestionAt = 0; quizFrameWarned = false; autoAnswerAttempted.clear();
             remoteQuizFrames = []; remoteQuizRequestedAt = 0; remoteQuizFirstRequestedAt = 0; remoteQuizAnswered = false; remoteQuizAnsweredAt = 0; remoteSubmitRequested = false; remoteQuizSubmitted = false; remoteQuizWarnedAt = 0; remoteQuizRequestLogged = false; remoteQuizPageUrl = ''; remoteQuizDetected = false; remoteQuizMidVideo = false; remoteProbeAt = 0; remoteProbeStartedAt = 0; remoteProbeWarned = false;
+            localVideoQuiz = null; localVideoQuizDone.clear(); localVideoQuizWarnedAt = 0;
             setRunningUI(true);
             paintLauncher(true);
             const smartStatus = [
@@ -9725,6 +9957,7 @@ Typr["U"] = {
             if (settings.autoNextEnabled) labels.push('视频结束→下一节');
             if (settings.autoSubmitEnabled) labels.push('答题完成→提交');
             if (settings.keepVideoPlaying) labels.push('视频不暂停');
+            if (settings.muteVideo) labels.push('视频静音');
             log(`${settings.dryRun ? '开始试运行' : settings.armed ? '开始自动托管' : '开始自动点击'}：${labels.join('、')}，间隔 ${settings.intervalMs}ms`, 'hit');
             tick();
         };
@@ -10659,7 +10892,7 @@ Typr["U"] = {
           #floating-launcher{position:fixed;display:flex;align-items:center;justify-content:center;width:44px;height:44px;min-height:0;padding:8px;border:1px solid #c53e3e;border-radius:50%;background:#d94a4a;color:#fff;box-shadow:0 6px 24px #b8333333;cursor:pointer;touch-action:none;user-select:none}#floating-launcher:hover{background:#c93d3d;border-color:#b93232}#floating-launcher:active{cursor:grabbing}#floating-launcher svg{width:26px;height:26px;pointer-events:none}.floating-dot{position:absolute;right:3px;top:3px;width:7px;height:7px;border:2px solid #fff;border-radius:50%;background:#92a1b6;pointer-events:none}#floating-launcher[data-busy=true] .floating-dot{background:#315fbd}#floating-launcher[data-phase=error] .floating-dot{background:#bd6848}#floating-launcher[data-autoclick=running] .floating-dot{background:#2e9b62}
         </style>
         <div id="panel" hidden data-active-view="questions">
-          <header class="head"><strong>学习通全自动学习 v1.2</strong><div class="head-actions">
+          <header class="head"><strong>学习通全自动学习 v1.4</strong><div class="head-actions">
             <button type="button" id="download-update" class="secondary" title="下载更新" aria-label="下载更新" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg></button>
             <button type="button" id="github" class="secondary" title="GitHub 个人主页" aria-label="GitHub 个人主页"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .75a11.25 11.25 0 0 0-3.558 21.923c.563.104.768-.244.768-.543v-2.096c-3.13.68-3.791-1.329-3.791-1.329-.512-1.3-1.25-1.646-1.25-1.646-1.022-.699.077-.685.077-.685 1.23.08 1.725 1.23 1.725 1.23 1.005 1.722 2.637 1.234 3.279.936.102-.728.393-1.235.715-1.507-2.499-.284-5.126-1.25-5.126-5.566 0-1.23.44-2.232 1.23-3.02-.116-.285-.503-1.43.111-2.98 0 0 .945-.302 3.094 1.233a10.78 10.78 0 0 1 5.625 0c2.149-1.455 3.092-1.233 3.092-1.233.615 1.55.228 2.695.112 2.98.722.788 1.239 1.79 1.239 3.02 0 4.327-2.631 5.279-5.138 5.558.404.35.763 1.04.763 2.097v3.078c0 .302.203.653.774.542A11.252 11.252 0 0 0 12 .75Z"/></svg></button>
             <button type="button" id="about-toggle" class="secondary" aria-label="项目介绍" aria-expanded="false" title="项目介绍">?</button>
@@ -10754,6 +10987,8 @@ Typr["U"] = {
                   <p class="auto-trigger-hint">检测视频 ended 或播放到结尾；等待约 0.8 秒后查找按钮，最多重试 10 秒。</p>
                   <label class="check-label"><input type="checkbox" id="auto-keep-video-playing" /> 视频不暂停（鼠标移出视频/窗口也继续播放）</label>
                   <p class="auto-trigger-hint">托管期间启用后台播放保护；鼠标移出视频或窗口不会暂停，手动暂停后不会被强行恢复。</p>
+                  <label class="check-label"><input type="checkbox" id="auto-mute-video" /> 视频静音（托管期间自动把视频静音）</label>
+                  <p class="auto-trigger-hint">开始托管后自动静音当前视频和新加载的视频；停止托管时恢复原来的静音状态。</p>
                   <hr class="auto-sep">
                   <label class="check-label auto-danger"><input type="checkbox" id="auto-submit-enabled" /> 答题完成 → 自动提交（不可逆）</label>
                   <label class="field-caption" for="auto-submit-rules">提交按钮（每行一个）</label>
@@ -11760,8 +11995,54 @@ Typr["U"] = {
             return { succeeded, total: nodes.length, filled };
         };
 
+        const findBridgeVideoQuiz = () => {
+            let roots = [];
+            try { roots = [...document.querySelectorAll(VIDEO_QUIZ_ROOT)].filter(courseElementVisible); } catch { return null; }
+            if (!roots.length) return null;
+            let videos = [];
+            try { videos = [...document.querySelectorAll('video')].filter(courseElementVisible); } catch { return null; }
+            for (const video of videos) {
+                try {
+                    const candidate = courseVideoQuizCandidate(video);
+                    if (candidate && roots.includes(candidate.root)) return { candidate, video };
+                } catch { /* 继续。 */ }
+            }
+            return videos.length ? { candidate: { root: roots[0], doc: document, video: videos[0], holder: videos[0].parentElement }, video: videos[0] } : null;
+        };
+        const runVideoAnswer = async () => {
+            const found = findBridgeVideoQuiz();
+            if (!found) return null;
+            const settings = autoClickSettings();
+            let snapshot;
+            try { snapshot = courseVideoQuizSnapshot(found.candidate); } catch (error) { return { succeeded: false, video: true, reason: `视频弹题无法读取：${error?.message || error}` }; }
+            if (!settings.videoQuizAnswer) return { succeeded: true, video: true, manual: true, total: snapshot.questions.length, filled: 0 };
+            const analysis = currentAnalysisSettings();
+            if (!analysis?.key || !analysis?.model) return { succeeded: false, video: true, reason: '视频弹题需要先在“模型设置”配置 API Key 和模型' };
+            try {
+                try { ctl.report(`视频弹题：开始分析 ${snapshot.questions.length} 题…`); } catch { /* 面板不可用。 */ }
+                const result = await solveQuestionBatches(snapshot, { ...analysis }, message => {
+                    try { ctl.report(`视频弹题：${message}`); } catch { /* 面板不可用。 */ }
+                }, { retryTransient: true });
+                const answers = result?.answers || [];
+                if (!answers.some(answer => answer.answer?.length)) return { succeeded: false, video: true, reason: '视频弹题没有生成有效答案' };
+                const summary = await prefillChecked(snapshot, answers);
+                const filled = summary.filled + summary.already;
+                if (summary.skipped || summary.unverified || filled !== snapshot.questions.length)
+                    return { succeeded: false, video: true, total: snapshot.questions.length, filled, reason: '视频弹题有题目未能自动填写' };
+                try { ctl.report(`视频弹题：已填写 ${filled}/${snapshot.questions.length} 题`); } catch { /* 面板不可用。 */ }
+                return { succeeded: true, video: true, total: snapshot.questions.length, filled };
+            } catch (error) {
+                return { succeeded: false, video: true, reason: String(error?.message || error) };
+            }
+        };
+
         const submitNow = token => {
             const settings = autoClickSettings();
+            // 视频弹题提交后通常直接关闭弹层，没有额外确认框；关闭即视为确认。
+            const videoRoot = () => {
+                try { return document.querySelector(VIDEO_QUIZ_ROOT); } catch { return null; }
+            };
+            const directVideo = Boolean(videoRoot());
             // 按用户要求：不再自行判断题目是否填完；生成答案流程成功后即点击提交。
             let button = autoClickFindAction(document, parseAutoClickRules(settings.submitRules), { ...settings, allowDanger: true });
             if (!button?.node) {
@@ -11786,6 +12067,12 @@ Typr["U"] = {
                 let confirmation = null;
                 try { confirmation = autoClickFindSubmitConfirmation([document]); } catch { confirmation = null; }
                 if (!confirmation) {
+                    // 视频弹题点提交后弹层直接消失，不必等 22 秒的章节测验确认窗口。
+                    if (directVideo && !videoRoot()) {
+                        if (!confirmedSent) { confirmedSent = true; post({ type: 'cx-auto-quiz-confirmed', token, ok: true }); }
+                        clearInterval(confirmTimer);
+                        return;
+                    }
                     if (lastClickAt && !confirmedSent) {
                         confirmedSent = true;
                         clearInterval(confirmTimer);
@@ -11803,6 +12090,22 @@ Typr["U"] = {
         const answerAndMaybeSubmit = async token => {
             busy = true;
             try {
+                const video = await runVideoAnswer();
+                if (video) {
+                    if (!video.succeeded) {
+                        post({ type: 'cx-auto-quiz-answered', token, ok: false, allFilled: false, video: true,
+                            total: video.total || 0, filled: video.filled || 0, reason: video.reason || 'video-analysis-failed' });
+                        return;
+                    }
+                    const settings = autoClickSettings();
+                    if (settings.autoSubmitEnabled && submitAfterAnswer && settings.videoQuizSubmit) {
+                        post({ type: 'cx-auto-quiz-answered', token, ok: true, allFilled: true, video: true, total: video.total, filled: video.filled });
+                        submitNow(token);
+                    } else {
+                        post({ type: 'cx-auto-quiz-answered', token, ok: true, allFilled: true, manualSubmit: true, video: true, total: video.total, filled: video.filled });
+                    }
+                    return;
+                }
                 const result = await runAnswer();
                 if (!result.succeeded) {
                     post({
@@ -11830,7 +12133,7 @@ Typr["U"] = {
             if (data.type === 'cx-auto-quiz-probe') {
                 if (!settings.autoAnswerEnabled && !settings.autoSubmitEnabled) return;
                 // 用与“一键生成答案”工具条完全相同的识别条件；识别不了的框架绝不回应，避免找错框架后触发 CX-PAR-001。
-                if (!hasQuestionNodes(document)) return;
+                if (!hasQuestionNodes(document) && !document.querySelector(VIDEO_QUIZ_ROOT)) return;
                 const nodes = autoClickQuestionNodes([document]);
                 const videoActive = [...document.querySelectorAll('video')].some(video => {
                     const duration = Number(video.duration);
@@ -11848,7 +12151,7 @@ Typr["U"] = {
                     post({ type: 'cx-auto-quiz-answered', token: data.token, ok: false, reason: 'busy' });
                     return;
                 }
-                if (!hasQuestionNodes(document)) {
+                if (!hasQuestionNodes(document) && !document.querySelector(VIDEO_QUIZ_ROOT)) {
                     post({ type: 'cx-auto-quiz-answered', token: data.token, ok: false, reason: 'no-questions' });
                     return;
                 }
@@ -11875,7 +12178,7 @@ Typr["U"] = {
             if (!autoSeenAt) autoSeenAt = Date.now();
             // 先给顶层消息 9 秒；消息到了就走消息流程，不重复生成。
             if (Date.now() - autoSeenAt < 9000) return;
-            if (ctl.state?.busy || !hasQuestionNodes(document)) return;
+            if (ctl.state?.busy || (!hasQuestionNodes(document) && !document.querySelector(VIDEO_QUIZ_ROOT))) return;
             autoStarted = true;
             post({ type: 'cx-auto-quiz-working', token: settings.bridgeToken });
             answerAndMaybeSubmit(settings.bridgeToken).catch(() => { /* 下面会回报失败。 */ });
@@ -11884,7 +12187,9 @@ Typr["U"] = {
         try { window.addEventListener('pagehide', () => clearInterval(autoTimer), { once: true }); } catch { /* 页面卸载时自动清理。 */ }
     }
     function initQuizAssistant(doc = document) {
-        if (!doc.body || !hasQuestionNodes(doc)) return;
+        if (!doc.body) return;
+        const hasVideoQuiz = Boolean(doc.querySelector('.ans-videoquiz,[data-video-quiz-root],#videoquiz-submit'));
+        if (!hasQuestionNodes(doc) && !hasVideoQuiz) return;
         initCredentialSettings();
         if (!controller) controller = createController();
         createAssistantPanel(doc, controller);

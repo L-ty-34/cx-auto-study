@@ -10,6 +10,7 @@
 2. 打开 [Releases](https://github.com/L-ty-34/cx-auto-study/releases/latest)，下载 `cx-auto-study.user.js` 并安装。
 3. 只保留这一个版本，禁用旧版脚本。
 4. 打开学习通课程学习页，点击助手面板，在“设置”里配置模型接口和 API Key。
+5. 第一次使用请照着 [使用步骤.md](使用步骤.md) 操作。
 
 也可以直接打开：
 
@@ -26,6 +27,7 @@ https://raw.githubusercontent.com/L-ty-34/cx-auto-study/main/cx-auto-study.user.
 - 确认后继续下一节，形成顺序托管
 - 视频中途弹出题目时，可按课程选择：自动答题、自动提交、提交后继续播放，或暂停等人工处理
 - 托管期间“视频不暂停”选项：鼠标移出视频/窗口也继续播放
+- 托管期间“视频静音”选项：开始后自动静音，停止后恢复原来的静音状态
 - 左侧任务栏只保留“题目”“自动点击”“设置”
 
 ## 使用与配置
@@ -45,10 +47,10 @@ https://raw.githubusercontent.com/L-ty-34/cx-auto-study/main/cx-auto-study.user.
 // @downloadURL  https://raw.githubusercontent.com/L-ty-34/cx-auto-study/main/cx-auto-study.user.js
 ```
 
-发布后 Tampermonkey 会自动检查更新。当前版本为 `1.2`。
+发布后 Tampermonkey 会自动检查更新。当前版本为 `1.4`。
 
 ## 来源与许可
 
 - 原始脚本：`学习通 AI 助手 1.23`（作者 Hailin，MIT）
-- 本修改版：学习通全自动学习 1.2（修改：L-ty-34）
+- 本修改版：学习通全自动学习 1.4（修改：L-ty-34）
 - 许可证：[MIT](LICENSE)，第三方来源见 [NOTICE](NOTICE)
