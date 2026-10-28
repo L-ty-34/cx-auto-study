@@ -7,15 +7,17 @@
 ## 安装
 
 1. 安装 Tampermonkey（Chrome / Edge）。
-2. 打开 [Releases](https://github.com/L-ty-34/cx-auto-study/releases/latest)，下载 `cx-auto-study.user.js` 并安装。
+2. 打开一键安装链接（Tampermonkey 会自动弹出安装页）：<https://cdn.jsdelivr.net/gh/L-ty-34/cx-auto-study@v1.4/cx-auto-study.user.js>
+   - 如果只显示代码：Tampermonkey 管理面板 → 实用工具 → 从 URL 安装，粘贴上面的链接。
+   - 也可以到 [Releases](https://github.com/L-ty-34/cx-auto-study/releases/latest) 下载 `cx-auto-study.user.js` 后拖进浏览器。
 3. 只保留这一个版本，禁用旧版脚本。
 4. 打开学习通课程学习页，点击助手面板，在“设置”里配置模型接口和 API Key。
 5. 第一次使用请照着 [使用步骤.md](使用步骤.md) 操作。
 
-也可以直接打开：
+一键安装地址：
 
 ```text
-https://raw.githubusercontent.com/L-ty-34/cx-auto-study/main/cx-auto-study.user.js
+https://cdn.jsdelivr.net/gh/L-ty-34/cx-auto-study@v1.4/cx-auto-study.user.js
 ```
 
 ## 主要功能
